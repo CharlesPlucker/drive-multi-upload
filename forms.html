@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_blank">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Drive Multi Large File Upload</title>
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/materialize/0.97.5/css/materialize.min.css">
+    <style>
+      .disclaimer{width: 480px; color:#646464;margin:20px auto;padding:0 16px;text-align:center;font:400 12px Roboto,Helvetica,Arial,sans-serif}.disclaimer a{color:#009688}#credit{display:none}
+    </style>
+  </head>
+  <body>
+    <form class="main" id="form" novalidate="novalidate" style="max-width: 480px;margin: 40px auto;">
+      <div id="forminner">
+        <div class="row">
+          <div class="col s12">
+            <h5 class="center-align teal-text">Google Drive Multi Large File Upload Form</h5>
+            <p class="disclaimer">Use this form to upload all files to a new folder with a given name.</p>
+          </div>
+        </div>
+        <div class="row">
+          <div class="input-field col s12">
+            <input id="name" type="text" name="Name" class="validate" required="required" aria-required="true">
+            <label for="name">Name of Upload Folder</label>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="file-field input-field col s12">
+            <div id="input-btn" class="btn">
+              <span>File(s)</span>
+              <input id="files" type="file" multiple>
+            </div>
+            <div class="file-path-wrapper">
+              <input class="file-path validate" type="text" placeholder="Select one or more files">
+            </div>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="input-field col s6">
+            <button id="submit-btn" class="waves-effect waves-light btn submit-btn" type="submit" onclick="submitForm(); return false;">Submit</button>
+          </div>
+        </div>
+        <div class="row">
+          <div class="input-field col s12 hide" id="update">
+            <hr>
+            <p>
+              Please wait as your file is being uploaded. Do not close or refresh the window while uploading.
+            </p>
+          </div>
+        </div>
+        <div class="row">
+          <div class="input-field col s12" id="progress">
+          </div>
+        </div>
+      </div>
+      <div id="success" style="display:none">
+        <h5 class="left-align teal-text">File(s) Uploaded!</h5>
+        <p>Everything has been uploaded into your new Folder.</p>
+      </div>
+    </form>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/2.2.0/jquery.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/materialize/0.97.5/js/materialize.min.js"></script>
+    <script src="https://gumroad.com/js/gumroad.js"></script>
+
+    <script>
+
+      const chunkSize = 5242880;
+      const uploadParentFolderId = "1XfEZB8VyahJfQj6M1urwW8oo7mUd02dk"; // creates a folder inside of this folder
+
+      function submitForm() {
+
+        if ($('#submit-btn.disabled')[0]) return; // short circuit
+
+        var name = $('#name')[0].value;
+        var files = [...$('#files')[0].files]; // convert from FileList to array
+
+        // Error validation
+        if (!name || name.length < 1) {
+          showError("Please enter a folder Name");
+          return;
+        }
+        if (files.length === 0) {
+          showError("Please select a file to upload");
+          return;
+        }
+
+        disableForm(); // prevent re submission
+
+        // the map and reduce are here to ensure that only one file is uploaded at a time. This allows
+        // the promises to be run sequentially
+        files.map(file => uploadFilePromiseFactory(file))
+            .reduce((promiseChain, currentTask) => {
+              return promiseChain.then(currentTask);
+            }, Promise.resolve([])).then( () => {
+              console.log("Completed all files upload");
+              showSuccess();
+            });
+      }
+
+      function disableForm() {
+        $('#submit-btn').addClass('disabled');
+        $('#input-btn').addClass('disabled');
+        $('#update').removeClass('hide');
+      }
+
+      function uploadFilePromiseFactory(file) {
+        return () => {
+          console.log("Processing: ", file.name);
+          return new Promise((resolve, reject) => {
+
+            showProgressMessage("File being loaded by FileReader.");
+
+            var fr = new FileReader();
+            fr.fileName = file.name;
+            fr.fileSize = file.size;
+            fr.fileType = file.type;
+            // not sure of a better way of passing the promise functions down
+            fr.resolve = () => resolve();
+            fr.reject = (error) => reject(error);
+            fr.onload = onFileReaderLoad;
+            fr.readAsArrayBuffer(file);
+          });
+        };
+      }
+      
+      /**
+       * Gets called once the browser has loaded a file. The main logic that creates a folder
+       * and initiates the file upload resides here
+       */
+      function onFileReaderLoad(onLoadEvent) {
+        var fr = this;
+
+        var newFolderName = $('#name')[0].value;
+        createOrGetFolder(newFolderName, uploadParentFolderId).then(newFolderId => {
+          console.log("Found or created guest folder with id: ", newFolderId);
+          uploadFileToDriveFolder.call(fr, newFolderId).then(() => {
+              fr.resolve();
+            }, (error) => {
+              fr.reject(error);
+            });
+          },
+          (error) => {
+            if (error) {
+              showError(error.toString());
+            }
+            console.log("onFileReaderLoad Error2: ", error);
+          });
+
+      }
+
+      /**
+       * call to the DriveApp api. Wrapped in a promise in case I want to address timing issues between a
+       * createFolder and findFolderById
+       */
+      function createOrGetFolder(folderName, parentFolderId) {
+        return new Promise((resolve, reject) => {
+          google.script.run.withSuccessHandler(response => {
+            console.log("createOrGetFolder response: ", response);
+            if (response && response.length) {
+              resolve(response);
+            }
+            reject(response);
+          }).createOrGetFolder(folderName, parentFolderId);
+        });
+      }
+
+      /**
+      * Helper functions modified from:
+      * https://github.com/tanaikech/Resumable_Upload_For_WebApps
+      */
+      function uploadFileToDriveFolder(parentFolderId) {
+        var fr = this;
+        return new Promise((resolve, reject) => {
+          var fileName = fr.fileName;
+          var fileSize = fr.fileSize;
+          var fileType = fr.fileType;
+          console.log({fileName: fileName, fileSize: fileSize, fileType: fileType});
+          var buf = fr.result;
+          var chunkpot = getChunkpot(chunkSize, fileSize);
+          var uint8Array = new Uint8Array(buf);
+          var chunks = chunkpot.chunks.map(function(e) {
+            return {
+               data: uint8Array.slice(e.startByte, e.endByte + 1),
+               length: e.numByte,
+               range: "bytes " + e.startByte + "-" + e.endByte + "/" + chunkpot.total,
+            };
+          });
+          google.script.run.withSuccessHandler(oAuthToken => {
+            var xhr = new XMLHttpRequest();
+            xhr.open("POST", "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable");
+            xhr.setRequestHeader('Authorization', "Bearer " + oAuthToken);
+            xhr.setRequestHeader('Content-Type', "application/json");
+            xhr.send(JSON.stringify({
+              mimeType: fileType,
+              name: fileName,
+              parents: [parentFolderId]
+            }));
+            xhr.onload = () => {
+              doUpload(fileName, {
+                location: xhr.getResponseHeader("location"),
+                chunks: chunks,
+              }).then(success => {
+                resolve(success);
+                console.log("Successfully uploaded: ", fileName);
+              },
+              error => {
+                reject(error);
+              });
+            };
+
+            xhr.onerror = () => {
+              console.log("ERROR: ", xhr.response);
+              reject(xhr.response);
+            };
+          }).getOAuthToken();
+        });
+      }
+
+      function showSuccess() {
+        $('#forminner').hide();
+        $('#success').show();
+      }
+
+      function showError(e) {
+        $('#progress').addClass('red-text').html(e);
+      }
+
+      function showMessage(e) {
+        $('#update').html(e);
+      }
+
+      function showProgressMessage(e) {
+        $('#progress').removeClass('red-text').html(e);
+      }
+
+      /**
+      * Helper functions modified from:
+      * https://github.com/tanaikech/Resumable_Upload_For_WebApps
+      */
+      function doUpload(fileName, e) {
+        return new Promise((resolve, reject) => {
+          showProgressMessage(fileName + ": Uploading: 0%");
+          var chunks = e.chunks;
+          var location = e.location;
+          var cnt = 0;
+          var end = chunks.length;
+          var temp = function callback(cnt) {
+            var e = chunks[cnt];
+            var xhr = new XMLHttpRequest();
+            xhr.open("PUT", location, true);
+            console.log("content range: ", e.range);
+            xhr.setRequestHeader('Content-Range', e.range);
+            xhr.send(e.data);
+            xhr.onloadend = function() {
+                var status = xhr.status;
+                cnt += 1;
+                console.log("Uploading: " + status + " (" + cnt + " / " + end + ")");
+                showProgressMessage(fileName + ": Uploading: " + Math.floor(100 * cnt / end) + "%");
+                if (status == 308) {
+                    callback(cnt);
+                } else if (status == 200) {
+                    $("#progress").text("Done.");
+                    resolve();
+                } else {
+                    $("#progress").text("Error: " + xhr.response);
+                    reject();
+                }
+            };
+          }(cnt);
+        });
+      }
+
+      /**
+      * Helper functions modified from:
+      * https://github.com/tanaikech/Resumable_Upload_For_WebApps
+      */
+      function getChunkpot(chunkSize, fileSize) {
+        var chunkPot = {};
+        chunkPot.total = fileSize;
+        chunkPot.chunks = [];
+        if (fileSize > chunkSize) {
+            var numE = chunkSize;
+            var endS = function(f, n) {
+                var c = f % n;
+                if (c == 0) {
+                    return 0;
+                } else {
+                    return c;
+                }
+            }(fileSize, numE);
+            var repeat = Math.floor(fileSize / numE);
+            for (var i = 0; i <= repeat; i++) {
+                var startAddress = i * numE;
+                var c = {};
+                c.startByte = startAddress;
+                if (i < repeat) {
+                    c.endByte = startAddress + numE - 1;
+                    c.numByte = numE;
+                    chunkPot.chunks.push(c);
+                } else if (i == repeat && endS > 0) {
+                    c.endByte = startAddress + endS - 1;
+                    c.numByte = endS;
+                    chunkPot.chunks.push(c);
+                }
+            }
+        } else {
+            var chunk = {
+                startByte: 0,
+                endByte: fileSize - 1,
+                numByte: fileSize,
+            };
+            chunkPot.chunks.push(chunk);
+        }
+        return chunkPot;
+      }
+
+    </script>
+
+  </body>
+
+</html>
